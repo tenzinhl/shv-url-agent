@@ -131,4 +131,6 @@ dist
 
 imgs/
 
+run_results/
+
 .DS_Store

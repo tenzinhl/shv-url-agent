@@ -10,9 +10,6 @@
 import dotenv from 'dotenv'
 import fs from 'fs/promises';
 import axios from 'axios';
-import FormData from 'form-data';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import pLimit from 'p-limit';
@@ -38,6 +35,8 @@ virtualConsole.on("error", (err) => {
 // - Top-level constants for modifying script behavior.
 // =====================
 
+const __dirname = import.meta.dirname;
+
 // Prompt for getting the top-level results.
 const GOOGLE_PROMPT = "Astera Labs Q2 Earnings 2024"
 
@@ -50,7 +49,7 @@ const QUERY_MODE = "imgtext";
 const NUM_RESULTS_PER_PAGE = 100;
 
 // Total number of URLs to pull from Google.
-const TOTAL_RESULTS = 40;
+const TOTAL_RESULTS = 2;
 
 // Whether to run Puppeteer in Headless mode.
 const HEADLESS = true;
@@ -63,6 +62,8 @@ const SEND_TO_EXPOSIT = true;
 
 // Whether URLs sent to exposit should be filtered by their shouldFetch function.
 const SHOULD_FETCH_ENABLED = false;
+
+const DATALOG_PATH = `${__dirname}/run_results/`
 
 // =====================
 // Helper functions
@@ -391,14 +392,17 @@ await log(`resultList.length() = ${resultList.length}`);
 await log(`Final results: ${JSON.stringify(resultList)}`);
 
 // Now we can filter if we want.
-resultUrls = resultList.map(item => item.url);
-highlyRelevantResults = resultList.filter(item => item.relevance === "5");
-expositShouldFetchUrls = resultList.filter(item => shouldFetch(item.url)).map(item => item.url);
+const resultUrls = resultList.map(item => item.url);
+const highlyRelevantResults = resultList.filter(item => item.relevance === "5");
+const expositShouldFetchUrls = resultList.filter(item => shouldFetch(item.url)).map(item => item.url);
 
-await log(`Highly relevant results: ${highlyRelevantResults}`);
-await log(`Highly relevant URLs: ${highlyRelevantResults.map(item => item.url)}`);
+await log(`Highly relevant results: ${JSON.stringify(highlyRelevantResults)}`);
+await log(`Highly relevant URLs: ${JSON.stringify(highlyRelevantResults.map(item => item.url))}`);
 await log(`All URLs: ${JSON.stringify(resultList.map(item => item.url))}`);
-await log(`All exposit fetchable URLs: ${expositShouldFetchUrls}`);
+await log(`All exposit fetchable URLs: ${JSON.stringify(expositShouldFetchUrls)}`);
+
+// Write the resultList to a file.
+await fs.writeFile(DATALOG_PATH + `${new Date().toISOString().replace(":", "-")}.json`, JSON.stringify(resultList));
 
 if (SEND_TO_EXPOSIT) {
     log("Sending URLs to Exposit");
