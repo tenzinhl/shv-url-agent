@@ -5,6 +5,8 @@ import { HttpProxyAgent } from 'http-proxy-agent';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import jsdom from 'jsdom';
+import pLimit from 'p-limit';
+
 const { JSDOM } = jsdom;
 
 // Returns a HTTP agent given a proxy configuration. Proxy configurations should be JS objects
@@ -16,15 +18,26 @@ function getHttpAgent(proxyOptions) {
     if (!proxyOptions.host || !proxyOptions.port || !proxyOptions.protocol) {
         throw new Error('Invalid proxy options');
     }
+
+    // Standard options for all HTTP agents.
+    const standardOptions = {
+        // Some proxies seem to cause SSL errors when reaching out to other websites (primarily out of date SSL certs).
+        // We don't care about this though as we aren't revealing any personal information. Disabling caring about SSL
+        // lets us use more proxies successfully.
+        rejectUnauthorized: false,
+        // Limit how long we wait for a proxy to connect.
+        timeout: 5000,
+    };
+
     switch (proxyOptions.protocol) {
         case 'http':
-            return new HttpProxyAgent(`http://${proxyOptions.host}:${proxyOptions.port}`);
+            return new HttpProxyAgent(`http://${proxyOptions.host}:${proxyOptions.port}`, standardOptions);
         case 'https':
-            return new HttpsProxyAgent(`https://${proxyOptions.host}:${proxyOptions.port}`);
+            return new HttpsProxyAgent(`https://${proxyOptions.host}:${proxyOptions.port}`, standardOptions);
         case 'socks4':
-            return new SocksProxyAgent(`socks4://${proxyOptions.host}:${proxyOptions.port}`);
+            return new SocksProxyAgent(`socks4://${proxyOptions.host}:${proxyOptions.port}`, standardOptions);
         case 'socks5':
-            return new SocksProxyAgent(`socks5://${proxyOptions.host}:${proxyOptions.port}`, { rejectUnauthorized: false });
+            return new SocksProxyAgent(`socks5://${proxyOptions.host}:${proxyOptions.port}`, standardOptions);
         default:
             throw new Error(`Invalid proxy protocol: ${proxyOptions.protocol}`);
     }
@@ -66,20 +79,24 @@ const proxyConfigs = lines.map(line => {
 
 // filteredProxies only contains high anonymity proxies that passed Google.
 const filteredProxies = proxyConfigs.filter(proxy => proxy.anonymityLevel === 'H' && proxy.googlePassed);
-console.log(filteredProxies);
+// console.log(filteredProxies);
 
-// Now lets see if we can actually use any of these.
-for (const proxy of filteredProxies) {
-    try {
-        const agent = getHttpAgent(proxy);
-        const axiosInstance = axios.create({
-            httpsAgent: agent,
-            proxy: false, // Disable any proxy settings in Axios itself
-        });
-        const response = await axiosInstance.get('https://www.whatsmyip.org');
-        const dom = new JSDOM(response.data);
-        console.log(`${proxy.host}:${proxy.port} Success: ${dom.window.document.querySelector('#ip').textContent}`);
-    } catch (error) {
-        console.error(`${proxy.host}:${proxy.port} Error:`, error.message);
-    }
-}
+const limit = pLimit(32);
+const proxyResultPromises = filteredProxies.map(proxy => {
+    limit(async () => {
+        try {
+            const agent = getHttpAgent(proxy);
+            const axiosInstance = axios.create({
+                httpsAgent: agent,
+                proxy: false, // Disable any proxy settings in Axios itself
+            });
+            const response = await axiosInstance.get('https://www.whatsmyip.org', { timeout: 5000 });
+            const dom = new JSDOM(response.data);
+            console.log(`${proxy.host}:${proxy.port} Success: ${dom.window.document.querySelector('#ip').textContent}`);
+        } catch (error) {
+            console.error(`${proxy.host}:${proxy.port} Error:`, error.message);
+        }
+    });
+});
+
+await Promise.all(proxyResultPromises);
