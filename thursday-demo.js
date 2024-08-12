@@ -18,6 +18,8 @@ puppeteer.use(StealthPlugin());
 import Anthropic from '@anthropic-ai/sdk';
 import { Readability } from '@mozilla/readability';
 import jsdom from 'jsdom';
+import { getHttpAgent, readProxyResults } from './spys-me-scrape.js';
+
 const { JSDOM } = jsdom;
 
 import { shouldFetch, sendUrlsToExposit } from './exposit-api.js';
@@ -44,26 +46,31 @@ const GOOGLE_PROMPT = "Astera Labs Q2 Earnings 2024"
 // Allowed values are "img", "text", or "imgtext". Each one includes the things that it lists.
 const QUERY_MODE = "imgtext";
 
+// Whether to run Puppeteer in Headless mode.
+const HEADLESS = true;
+
+// If true then the script will send the sourced URLs to exposit at the end.
+const SEND_TO_EXPOSIT = false;
+
+// Path to directory under which the run results will be stored. A new file is created for each run of the script.
+// The created file's name is timestamped based on when the result is stored.
+const DATALOG_PATH = `${__dirname}/run_results/`
+
+// Whether to use proxies for querying the source websites. Google and Claude queries do *not* use proxies.
+const USE_PROXIES = false;
+
 // Number of Google results to show per page. Should match one of Google's allowed values: https://stackoverflow.com/a/30879675
 // Although some brief testing with small numbers like 1,2,3 suggest they work as well.
 const NUM_RESULTS_PER_PAGE = 100;
 
-// Total number of URLs to pull from Google.
+// Total number of URLs to pull from Google. This count includes URLs we are unable to browse.
 const TOTAL_RESULTS = 2;
-
-// Whether to run Puppeteer in Headless mode.
-const HEADLESS = true;
 
 // Sourced from https://www.useragents.me/
 const USER_AGENTS = [{ "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.1", "pct": 40.65 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.3", "pct": 14.95 }, { "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.3", "pct": 8.88 }, { "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/25.0 Chrome/121.0.0.0 Safari/537.3", "pct": 8.41 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.3", "pct": 6.54 }, { "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.3", "pct": 4.67 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.3", "pct": 3.74 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Unique/100.7.6266.6", "pct": 3.74 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.", "pct": 1.87 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.", "pct": 1.87 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/117.", "pct": 0.93 }, { "ua": "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.3", "pct": 0.93 }, { "ua": "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.", "pct": 0.93 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.192 Safari/537.3", "pct": 0.93 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.", "pct": 0.93 }];
 
-// If true then the script will send the sourced URLs to exposit at the end.
-const SEND_TO_EXPOSIT = true;
-
 // Whether URLs sent to exposit should be filtered by their shouldFetch function.
 const SHOULD_FETCH_ENABLED = false;
-
-const DATALOG_PATH = `${__dirname}/run_results/`
 
 // =====================
 // Helper functions
@@ -223,9 +230,22 @@ Only respond with a number and nothing else.
 How relevant is the article to the prompt?`;
 }
 
-// Takes a source POJO with a "url" field and slaps Claude's relevance score onto the object.
-async function getSourceRelevance(source) {
-    const resultPage = await browser.newPage();
+// Take a source POJO with a "url" field and slap Claude's relevance score onto the object.
+// Second parameter is a config object that can have the following fields:
+// - proxy: the proxy to use when navigating to the source URL. Should be a full URI like "socks5://127.0.0.1:2022"
+async function getSourceRelevance(source, config) {
+    let resultPage = undefined;
+
+    // Use proxy if requested.
+    if (config?.proxy) {
+        // Create a new incognito browser context
+        const context = await browser.createBrowserContext({ proxy: config.proxy });
+        // Create a new page inside context.
+        resultPage = await context.newPage();
+    } else {
+        resultPage = await browser.newPage();
+    }
+    
     await resultPage.setExtraHTTPHeaders(get_non_sus_headers());
     try {
         await resultPage.goto(source.url, { waitUntil: ['networkidle2', 'domcontentloaded'], timeout: 20000 });
@@ -293,6 +313,11 @@ async function getSourceRelevance(source) {
     return source;
 }
 
+// Return a random proxy string from a list of proxy objects. Proxy object format is produced in spys-me-scrape.js.
+function getRandomProxyString(proxyList) {
+    const chosenProxy = proxyList[Math.floor(Math.random() * proxyList.length)];
+    return `${chosenProxy.protocol}://${chosenProxy.host}:${chosenProxy.port}`;
+}
 
 // =====================
 // Main Logic
@@ -304,7 +329,21 @@ await log("==================================================================")
 await log("====================== New run of script! ======================")
 await log("==================================================================")
 
-const start = Date.now();
+const scriptStart = Date.now();
+
+// Load the proxy list if possible.
+let proxyList = [];
+if (USE_PROXIES) {
+    try {
+        const fullProxyResults = await readProxyResults();
+        await log(`Loaded ${fullProxyResults.length} proxies from spys.me.`);
+
+        proxyList = fullProxyResults.filter(proxy => proxy.success);
+        await log(`Loaded ${proxyList.length} proxies from spys.me that worked.`);
+    } catch (error) {
+        await log(`ERROR: Failed to load proxy results: ${error.message}\n Either run the proxy scraping script or set USE_PROXIES to false.`);
+    }
+}
 
 const client = new Anthropic({
     apiKey: process.env['ANTHROPIC_API_KEY'], // This is the default and can be omitted
@@ -373,7 +412,10 @@ while (resultCount < TOTAL_RESULTS) {
     pageResultIdx++;
 
     // Get the relevance score for the page.
-    relevancePromises.push(requestLimit(getSourceRelevance, source));
+    const getSourceConfig = {
+        proxy: USE_PROXIES ? getRandomProxyString(proxyList) : undefined
+    }
+    relevancePromises.push(requestLimit(getSourceRelevance, source, getSourceConfig));
 
     // We're onto next result.
     resultCount++;
@@ -385,8 +427,8 @@ let resultList = await Promise.all(relevancePromises);
 // Filter out any undefined results.
 resultList = resultList.filter(item => item !== undefined);
 
-const end = Date.now();
-console.log(`Execution time: ${end - start} ms`);
+const scriptEnd = Date.now();
+console.log(`Execution time: ${scriptEnd - scriptStart} ms`);
 
 await log(`resultList.length() = ${resultList.length}`);
 await log(`Final results: ${JSON.stringify(resultList)}`);
@@ -394,12 +436,12 @@ await log(`Final results: ${JSON.stringify(resultList)}`);
 // Now we can filter if we want.
 const resultUrls = resultList.map(item => item.url);
 const highlyRelevantResults = resultList.filter(item => item.relevance === "5");
-const expositShouldFetchUrls = resultList.filter(item => shouldFetch(item.url)).map(item => item.url);
+// const expositShouldFetchUrls = resultList.filter(item => shouldFetch(item.url)).map(item => item.url);
 
 await log(`Highly relevant results: ${JSON.stringify(highlyRelevantResults)}`);
 await log(`Highly relevant URLs: ${JSON.stringify(highlyRelevantResults.map(item => item.url))}`);
 await log(`All URLs: ${JSON.stringify(resultList.map(item => item.url))}`);
-await log(`All exposit fetchable URLs: ${JSON.stringify(expositShouldFetchUrls)}`);
+// await log(`All exposit fetchable URLs: ${JSON.stringify(expositShouldFetchUrls)}`);
 
 // Write the resultList to a file.
 await fs.writeFile(DATALOG_PATH + `${new Date().toISOString().replace(":", "-")}.json`, JSON.stringify(resultList));

@@ -6,8 +6,14 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import jsdom from 'jsdom';
 import pLimit from 'p-limit';
+import fs from 'fs/promises';
+import esMain from 'es-main';
 
 const { JSDOM } = jsdom;
+
+// ========
+// HELPER FUNCTIONS
+// ========
 
 // Returns a HTTP agent given a proxy configuration. Proxy configurations should be JS objects
 // with the following properties:
@@ -24,7 +30,7 @@ function getHttpAgent(proxyOptions) {
         // Some proxies seem to cause SSL errors when reaching out to other websites (primarily out of date SSL certs).
         // We don't care about this though as we aren't revealing any personal information. Disabling caring about SSL
         // lets us use more proxies successfully.
-        rejectUnauthorized: false,
+        rejectUnauthorized: true,
         // Limit how long we wait for a proxy to connect.
         timeout: 5000,
     };
@@ -43,60 +49,85 @@ function getHttpAgent(proxyOptions) {
     }
 }
 
+// Read the proxy results file into a JS object. Throws an error if the result file does not exist.
+async function readProxyResults() {
+    return JSON.parse(await fs.readFile('run_results/spys-me-proxies.json'));
+}
+
 // ========
 // MAIN LOGIC
 // ========
 
-// Fetch https://spys.me/socks.txt using axios
-const response = await axios.get('https://spys.me/socks.txt');
+async function main() {
+    // Fetch https://spys.me/socks.txt using axios
+    const response = await axios.get('https://spys.me/socks.txt');
 
-const lines = response.data.split('\n');
-// console.log(lines);
+    const lines = response.data.split('\n');
+    // console.log(lines);
 
-const proxyConfigs = lines.map(line => {
-    // host:port is everything before first space.
-    const hostport = line.substring(0, line.indexOf(' '));
+    const proxyConfigs = lines.map(line => {
+        // host:port is everything before first space.
+        const hostport = line.substring(0, line.indexOf(' '));
 
-    const rest = line.substring(line.indexOf(' ') + 1);
-    // First two characters are country code.
-    const countryCode = rest.substring(0, 2);
+        const rest = line.substring(line.indexOf(' ') + 1);
+        // First two characters are country code.
+        const countryCode = rest.substring(0, 2);
 
-    // There's some more information in the txt file including whether SSL is supported, although
-    // the format gets kind of wonky and unexplained. For example there's occasionally exclamation
-    // marks for no clear reason, and the number of dashes in a line varies with no clear pattern.
-    // Ah wait, I think the last - is actually a negative google pass! Jeez that's confusing.
-    // Still don't know what the exclamation marks are though.
+        // There's some more information in the txt file including whether SSL is supported, although
+        // the format gets kind of wonky and unexplained. For example there's occasionally exclamation
+        // marks for no clear reason, and the number of dashes in a line varies with no clear pattern.
+        // Ah wait, I think the last - is actually a negative google pass! Jeez that's confusing.
+        // Still don't know what the exclamation marks are though.
 
-    return {
-        host: hostport.substring(0, hostport.indexOf(':')),
-        port: Number(hostport.substring(hostport.indexOf(':') + 1)),
-        countryCode: countryCode,
-        anonymityLevel: rest.substring(3, 4),
-        googlePassed: rest.includes('+'),
-        protocol: 'socks5',
-    }
-});
-
-// filteredProxies only contains high anonymity proxies that passed Google.
-const filteredProxies = proxyConfigs.filter(proxy => proxy.anonymityLevel === 'H' && proxy.googlePassed);
-// console.log(filteredProxies);
-
-const limit = pLimit(32);
-const proxyResultPromises = filteredProxies.map(proxy => {
-    limit(async () => {
-        try {
-            const agent = getHttpAgent(proxy);
-            const axiosInstance = axios.create({
-                httpsAgent: agent,
-                proxy: false, // Disable any proxy settings in Axios itself
-            });
-            const response = await axiosInstance.get('https://www.whatsmyip.org', { timeout: 5000 });
-            const dom = new JSDOM(response.data);
-            console.log(`${proxy.host}:${proxy.port} Success: ${dom.window.document.querySelector('#ip').textContent}`);
-        } catch (error) {
-            console.error(`${proxy.host}:${proxy.port} Error:`, error.message);
+        return {
+            host: hostport.substring(0, hostport.indexOf(':')),
+            port: Number(hostport.substring(hostport.indexOf(':') + 1)),
+            countryCode: countryCode,
+            anonymityLevel: rest.substring(3, 4),
+            googlePassed: rest.includes('+'),
+            protocol: 'socks5',
         }
     });
-});
 
-await Promise.all(proxyResultPromises);
+    // filteredProxies only contains high anonymity proxies that passed Google.
+    const filteredProxies = proxyConfigs.filter(proxy => proxy.anonymityLevel === 'H' && proxy.googlePassed);
+    // console.log(filteredProxies);
+
+    const limit = pLimit(32);
+    const proxyResultPromises = filteredProxies.map(proxy =>
+        limit(async () => {
+            try {
+                const agent = getHttpAgent(proxy);
+                const axiosInstance = axios.create({
+                    httpsAgent: agent,
+                    proxy: false, // Disable any proxy settings in Axios itself
+                });
+                const start = Date.now();
+                const response = await axiosInstance.get('https://www.whatsmyip.org', { timeout: 5000 });
+                const end = Date.now();
+                const dom = new JSDOM(response.data);
+                console.log(`${proxy.host}:${proxy.port} Success: ${dom.window.document.querySelector('#ip').textContent}`);
+                proxy.success = true;
+                proxy.latency = end - start;
+
+
+            } catch (error) {
+                console.error(`${proxy.host}:${proxy.port} Error:`, error.message);
+                proxy.success = false;
+            }
+
+            return proxy;
+        })
+    );
+
+    const proxyResults = await Promise.all(proxyResultPromises);
+
+    // Write proxyResults to a file.
+    await fs.writeFile('run_results/spys-me-proxies.json', JSON.stringify(proxyResults));
+}
+
+if (esMain(import.meta)) {
+    main();
+}
+
+export { getHttpAgent, readProxyResults };
