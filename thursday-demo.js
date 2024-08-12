@@ -19,6 +19,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { Readability } from '@mozilla/readability';
 import jsdom from 'jsdom';
 import { getHttpAgent, readProxyResults } from './spys-me-scrape.js';
+import { setTimeout } from "timers/promises";
 
 const { JSDOM } = jsdom;
 
@@ -47,7 +48,7 @@ const GOOGLE_PROMPT = "Astera Labs Q2 Earnings 2024"
 const QUERY_MODE = "imgtext";
 
 // Whether to run Puppeteer in Headless mode.
-const HEADLESS = true;
+const HEADLESS = false;
 
 // If true then the script will send the sourced URLs to exposit at the end.
 const SEND_TO_EXPOSIT = false;
@@ -64,7 +65,7 @@ const USE_PROXIES = false;
 const NUM_RESULTS_PER_PAGE = 100;
 
 // Total number of URLs to pull from Google. This count includes URLs we are unable to browse.
-const TOTAL_RESULTS = 2;
+const TOTAL_RESULTS = 12;
 
 // Sourced from https://www.useragents.me/
 const USER_AGENTS = [{ "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.1", "pct": 40.65 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.3", "pct": 14.95 }, { "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.3", "pct": 8.88 }, { "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/25.0 Chrome/121.0.0.0 Safari/537.3", "pct": 8.41 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.3", "pct": 6.54 }, { "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.3", "pct": 4.67 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.3", "pct": 3.74 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Unique/100.7.6266.6", "pct": 3.74 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.", "pct": 1.87 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 OPR/112.0.0.", "pct": 1.87 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/117.", "pct": 0.93 }, { "ua": "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.3", "pct": 0.93 }, { "ua": "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.", "pct": 0.93 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.192 Safari/537.3", "pct": 0.93 }, { "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.", "pct": 0.93 }];
@@ -92,6 +93,23 @@ async function log(message) {
     console.log(logMessage);
 }
 
+// Add/Update a key-value pair in the URL query parameters of uri. Yoinked from: https://gist.github.com/niyazpk/f8ac616f181f6042d1e0
+function updateUrlParameter(uri, key, value) {
+    // remove the hash part before operating on the uri
+    var i = uri.indexOf('#');
+    var hash = i === -1 ? '' : uri.substr(i);
+    uri = i === -1 ? uri : uri.substr(0, i);
+
+    var re = new RegExp("([?&])" + key + "=.*?(&|$)", "i");
+    var separator = uri.indexOf('?') !== -1 ? "&" : "?";
+    if (uri.match(re)) {
+        uri = uri.replace(re, '$1' + key + "=" + value + '$2');
+    } else {
+        uri = uri + separator + key + "=" + value;
+    }
+    return uri + hash;  // finally append the hash as well
+}
+
 // Use Mozilla's Readability library to extract the text of a webpage and filter out
 // excessive whitespace.
 // page should be a Puppeteer Page object.
@@ -117,11 +135,24 @@ async function getWebpageText(page, url) {
 // Returns a good set of headers to reduce suspicion of bot activity.
 function get_non_sus_headers() {
     return {
-        'user-agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)].ua,
+        // 'user-agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)].ua,
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
         'upgrade-insecure-requests': '1',
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3',
-        'accept-encoding': 'gzip, deflate, br',
-        'accept-language': 'en-US,en;q=0.9,en;q=0.8'
+        'accept-encoding': 'gzip, deflate, br, zstd',
+        'accept-language': 'en-US',
+        'referer': 'https://www.google.com/',
+        'Priority': 'u=0, i',
+        'Cache-Control': 'max-age=0',
+        'Cookie': 'AEC=AVYB7crgufBzsGTmmOnIkW5g-QcEilyj_6IRkNVbakFIZ-kPfFjW_vUM-Bs; NID=516=K0SiNJ5z9SqgPecnf8evF6hZn2SoBmW0SBuDKtHeCnt9ja3oI6t7X46H6JoYelU1QwIMTHujSb5AKPxD46aTMgo6Lm7EfN9opPi9_6c4_8rkbRBTxDPdrOgtwNnyrv24E2c-OmRxU5CunDaA6rR7Z-JCF6wStBleDhxj7sWZttWzOMh7kw0KyoP6PSU51xYeIgtW8Tk9oy6TaWInI4mdfg; DV=czX_QWGFEAosEM4dSZxmxyyqyxGLFBmlMnZRmgOuVngDAAA',
+        'Sec-Ch-Ua': '" Not;A Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Mac OS X"',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'X-Client-Data': "CJSGywE="
     };
 }
 
@@ -245,7 +276,7 @@ async function getSourceRelevance(source, config) {
     } else {
         resultPage = await browser.newPage();
     }
-    
+
     await resultPage.setExtraHTTPHeaders(get_non_sus_headers());
     try {
         await resultPage.goto(source.url, { waitUntil: ['networkidle2', 'domcontentloaded'], timeout: 20000 });
@@ -352,7 +383,7 @@ const client = new Anthropic({
 const browser = await puppeteer.launch({
     headless: HEADLESS,
 });
-const mainPage = await browser.newPage();
+const [mainPage] = await browser.pages();
 await mainPage.setExtraHTTPHeaders(get_non_sus_headers());
 
 // Which page of Google search results we are on.
@@ -367,6 +398,16 @@ let relevancePromises = [];
 // Max number of outstanding webpage relevance workers.
 const requestLimit = pLimit(50);
 
+// The natural navigation method. Do it this way to avoid bot detection.
+mainPage.goto("https://www.google.com/");
+await mainPage.waitForNavigation();
+await mainPage.type('[aria-label="Search"]', GOOGLE_PROMPT);
+await mainPage.keyboard.press("Enter");
+await mainPage.waitForNavigation();
+
+// Update the target URL to have 100 results per page.
+let targetUrl = updateUrlParameter(mainPage.url(), "num", NUM_RESULTS_PER_PAGE.toString());
+
 while (resultCount < TOTAL_RESULTS) {
 
     // If we've exhausted the current page of results, load the next page.
@@ -375,7 +416,8 @@ while (resultCount < TOTAL_RESULTS) {
         pageResultIdx = 0;
 
         // Load a page of Google results.
-        await mainPage.goto(`https://www.google.com/search?q=${encodeURIComponent(GOOGLE_PROMPT)}&num=${NUM_RESULTS_PER_PAGE.toString()}&start=${(googlePage * NUM_RESULTS_PER_PAGE).toString()}`,
+        targetUrl = updateUrlParameter(mainPage.url(), "start", (googlePage * NUM_RESULTS_PER_PAGE).toString());
+        await mainPage.goto(targetUrl,
             { waitUntil: ['networkidle2', 'domcontentloaded'] });
 
         // Extract a list of URLs and Titles from the page of search results.
